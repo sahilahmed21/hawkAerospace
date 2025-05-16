@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Text, View, TextInput, TouchableOpacity, SafeAreaView, ScrollView, Modal, FlatList, Alert } from 'react-native';
+import { Text, View, TextInput, TouchableOpacity, SafeAreaView, ScrollView, Modal, FlatList, Alert, ActivityIndicator } from 'react-native';
 import tw from "../tailwind";
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import MapView from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5, AntDesign } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import firestore from '@react-native-firebase/firestore';
+import { useAuth } from './contexts/UserContext';
 
 interface FormData {
   address: string;
@@ -20,21 +21,25 @@ interface FormData {
 
 interface SprayRequest {
   id: string;
+  userId: string;
   address: string;
-  acres: string;
-  numberOfTanks: string;
-  tanksToSpray: string;
-  sprayingDate: string;
+  acres: number;
+  numberOfTanks: number;
+  tanksToSpray: number;
+  sprayingDate: any;
   agrochemical: string;
   crop: string;
   price: number;
   status: 'Pending' | 'Accepted' | 'Completed' | 'Rejected';
-  createdAt: string;
+  createdAt: any;
+  updatedAt: any;
+  couponApplied: string | null;
 }
 
 type FormField = keyof FormData;
 
 const Spraying = () => {
+  const { currentUser } = useAuth();
   const router = useRouter();
   const mapRef = useRef<MapView | null>(null);
   const params = useLocalSearchParams<{ lat?: string; lng?: string; selectedCrop?: string }>();
@@ -44,7 +49,7 @@ const Spraying = () => {
     acres: '',
     numberOfTanks: '',
     tanksToSpray: '3',
-    sprayingDate: '13/03/2025',
+    sprayingDate: '2025-03-13',
     agrochemical: 'Insecticide',
     crop: 'Bajra',
     coupon: ''
@@ -52,12 +57,13 @@ const Spraying = () => {
 
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [locationPermission, setLocationPermission] = useState(null);
   const [finalPrice, setFinalPrice] = useState(1500.00);
   const [couponError, setCouponError] = useState('');
   const [showCropModal, setShowCropModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [filteredCrops, setFilteredCrops] = useState([]);
+  const [filteredCrops, setFilteredCrops] = useState<string[]>([]);
 
   useEffect(() => {
     let isMounted = true;
@@ -77,7 +83,7 @@ const Spraying = () => {
         longitude: parseFloat(params.lng),
       });
     }
-    
+
     if (params.selectedCrop) {
       handleInputChange('crop', params.selectedCrop);
     }
@@ -91,40 +97,43 @@ const Spraying = () => {
   };
 
   const handleCreateRequest = async () => {
-    if (!formData.acres || !formData.numberOfTanks || !formData.tanksToSpray || !formData.sprayingDate) {
-      Alert.alert('Error', 'Please fill all required fields');
+    if (!currentUser) {
+      Alert.alert('Error', 'You must be logged in to create a request.');
+      return;
+    }
+    if (!formData.acres || !formData.numberOfTanks || !formData.tanksToSpray || !formData.sprayingDate || !formData.crop) {
+      Alert.alert('Error', 'Please fill all required fields related to spraying need, date, and crop.');
       return;
     }
 
+    setIsSubmitting(true);
     try {
-      const newRequest: SprayRequest = {
+      const newRequestData: SprayRequest = {
         id: Math.random().toString(36).substring(7),
+        userId: currentUser.uid,
         address: formData.address,
-        acres: formData.acres,
-        numberOfTanks: formData.numberOfTanks,
-        tanksToSpray: formData.tanksToSpray,
-        sprayingDate: formData.sprayingDate,
+        acres: parseFloat(formData.acres) || 0,
+        numberOfTanks: parseInt(formData.numberOfTanks) || 0,
+        tanksToSpray: parseInt(formData.tanksToSpray) || 0,
+        sprayingDate: firestore.Timestamp.fromDate(new Date(formData.sprayingDate)),
         agrochemical: formData.agrochemical,
         crop: formData.crop,
         price: finalPrice,
         status: 'Pending',
-        createdAt: new Date().toISOString(),
+        createdAt: firestore.FieldValue.serverTimestamp(),
+        updatedAt: firestore.FieldValue.serverTimestamp(),
+        couponApplied: formData.coupon.trim() || null,
       };
 
-      const existingRequests = await AsyncStorage.getItem('sprayRequests');
-      const requests = existingRequests ? JSON.parse(existingRequests) : [];
-      requests.unshift(newRequest); // Add new request at beginning
-      await AsyncStorage.setItem('sprayRequests', JSON.stringify(requests));
+      await firestore().collection('sprayRequests').add(newRequestData);
 
       Alert.alert('Success', 'Request created successfully!');
-      
-      router.push({
-        pathname: '/requests',
-        params: { refresh: 'true' }
-      });
-    } catch (error) {
+      router.push({ pathname: '/(tabs)/requests', params: { refresh: 'true' } });
+    } catch (error: any) {
       console.error('Error creating request:', error);
-      Alert.alert('Error', 'Failed to create request. Please try again.');
+      Alert.alert('Error', error.message || 'Failed to create request. Please try again.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -152,14 +161,14 @@ const Spraying = () => {
   );
 
   const allCrops = [
-    'Arecanut', 'Bajra', 'Banana', 'Barley', 'Black Pepper', 
+    'Arecanut', 'Bajra', 'Banana', 'Barley', 'Black Pepper',
     'Brinjal', 'Cabbage', 'Cardamom', 'Cashew Nut', 'Castor seed',
-    'Cauliflower', 'Chilli', 'Coconut', 'Coffee', 'Cotton', 
-    'Cucumber', 'Garlic', 'Ginger', 'Gram', 'Grapes', 
-    'Groundnut', 'Jowar', 'Jute', 'Lentil', 'Maize', 
-    'Mango', 'Mustard', 'Onion', 'Orange', 'Paddy', 
-    'Pea', 'Potato', 'Ragi', 'Rapeseed', 'Rice', 
-    'Rubber', 'Safflower', 'Soyabean', 'Sugarcane', 'Sunflower', 
+    'Cauliflower', 'Chilli', 'Coconut', 'Coffee', 'Cotton',
+    'Cucumber', 'Garlic', 'Ginger', 'Gram', 'Grapes',
+    'Groundnut', 'Jowar', 'Jute', 'Lentil', 'Maize',
+    'Mango', 'Mustard', 'Onion', 'Orange', 'Paddy',
+    'Pea', 'Potato', 'Ragi', 'Rapeseed', 'Rice',
+    'Rubber', 'Safflower', 'Soyabean', 'Sugarcane', 'Sunflower',
     'Tea', 'Tomato', 'Turmeric', 'Wheat'
   ];
 
@@ -168,7 +177,7 @@ const Spraying = () => {
       setFilteredCrops(allCrops);
     } else {
       const query = searchQuery.toLowerCase();
-      const filtered = allCrops.filter(crop => 
+      const filtered = allCrops.filter(crop =>
         crop.toLowerCase().includes(query)
       );
       setFilteredCrops(filtered);
@@ -182,13 +191,13 @@ const Spraying = () => {
   const handleViewAllCrops = () => {
     setShowCropModal(true);
   };
-  
-  const handleSelectCrop = (crop) => {
+
+  const handleSelectCrop = (crop: string) => {
     handleInputChange('crop', crop);
     setShowCropModal(false);
   };
-  
-  const renderCropItem = ({ item }) => (
+
+  const renderCropItem = ({ item }: { item: string }) => (
     <TouchableOpacity
       style={tw`py-3 border-b border-gray-100 flex-row items-center`}
       onPress={() => handleSelectCrop(item)}
@@ -212,7 +221,7 @@ const Spraying = () => {
                 <Text style={tw`text-gray-500`}>Close</Text>
               </TouchableOpacity>
             </View>
-            
+
             <View style={tw`p-4`}>
               <View style={tw`bg-gray-100 rounded-full flex-row items-center px-4 py-2`}>
                 <Ionicons name="search" size={20} color="#6B7280" />
@@ -225,7 +234,7 @@ const Spraying = () => {
                 />
               </View>
             </View>
-            
+
             <FlatList
               data={filteredCrops}
               renderItem={renderCropItem}
@@ -238,7 +247,6 @@ const Spraying = () => {
 
       <ScrollView contentContainerStyle={tw`pb-10`}>
         <View style={tw`bg-white`}>
-          {/* Address */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <View style={tw`flex-row items-center mb-3`}>
               <StepIcon icon={<Ionicons name="location-outline" size={14} color="white" />} />
@@ -252,7 +260,6 @@ const Spraying = () => {
             />
           </View>
 
-          {/* Spraying Need */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <View style={tw`flex-row items-center mb-3`}>
               <StepIcon icon={<MaterialCommunityIcons name="spray" size={14} color="white" />} />
@@ -276,7 +283,6 @@ const Spraying = () => {
             </View>
           </View>
 
-          {/* Tanks to Spray */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <View style={tw`flex-row items-center mb-3`}>
               <StepIcon icon={<MaterialCommunityIcons name="water-pump" size={14} color="white" />} />
@@ -291,7 +297,6 @@ const Spraying = () => {
             />
           </View>
 
-          {/* Spraying Date */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <View style={tw`flex-row items-center mb-3`}>
               <StepIcon icon={<Ionicons name="calendar-outline" size={14} color="white" />} />
@@ -305,7 +310,6 @@ const Spraying = () => {
             />
           </View>
 
-          {/* Agrochemical */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <View style={tw`flex-row items-center mb-3`}>
               <StepIcon icon={<FontAwesome5 name="flask" size={12} color="white" />} />
@@ -319,16 +323,15 @@ const Spraying = () => {
             />
           </View>
 
-          {/* Crop */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <View style={tw`flex-row items-center mb-3`}>
               <StepIcon icon={<MaterialCommunityIcons name="seed-outline" size={14} color="white" />} />
               <Text style={tw`text-sm`}>Select Crop</Text>
             </View>
-            
+
             <View style={tw`mt-2`}>
               <View style={tw`flex-row flex-wrap`}>
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={tw`mr-2 mb-2 border border-gray-300 rounded-full py-2 px-4 flex-row items-center ${formData.crop === 'Arecanut' ? 'bg-green-50 border-green-500' : ''}`}
                   onPress={() => handleInputChange('crop', 'Arecanut')}
                 >
@@ -338,7 +341,7 @@ const Spraying = () => {
                   <Text>Arecanut</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={tw`mr-2 mb-2 border border-gray-300 rounded-full py-2 px-4 flex-row items-center ${formData.crop === 'Bajra' ? 'bg-green-50 border-green-500' : ''}`}
                   onPress={() => handleInputChange('crop', 'Bajra')}
                 >
@@ -348,7 +351,7 @@ const Spraying = () => {
                   <Text>Bajra</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={tw`mb-2 border border-gray-300 rounded-full py-2 px-4 flex-row items-center`}
                   onPress={handleViewAllCrops}
                 >
@@ -358,7 +361,6 @@ const Spraying = () => {
             </View>
           </View>
 
-          {/* Coupon Code */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <View style={tw`flex-row items-center mb-3`}>
               <StepIcon icon={<AntDesign name="gift" size={14} color="white" />} />
@@ -376,15 +378,21 @@ const Spraying = () => {
             </TouchableOpacity>
           </View>
 
-          {/* Final Price */}
           <View style={tw`p-4 border-b border-gray-100`}>
             <Text style={tw`text-lg font-semibold`}>Final Price: ₹{finalPrice.toFixed(2)}</Text>
           </View>
 
-          {/* Create Button */}
           <View style={tw`p-4`}>
-            <TouchableOpacity onPress={handleCreateRequest} style={tw`bg-blue-600 rounded-full py-4 items-center`}>
-              <Text style={tw`text-white font-semibold`}>Create Request</Text>
+            <TouchableOpacity
+              onPress={handleCreateRequest}
+              style={tw`bg-blue-600 rounded-full py-4 items-center ${isSubmitting ? 'opacity-50' : ''}`}
+              disabled={isSubmitting}
+            >
+              {isSubmitting ? (
+                <ActivityIndicator color="white" />
+              ) : (
+                <Text style={tw`text-white font-semibold`}>Create Request</Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>

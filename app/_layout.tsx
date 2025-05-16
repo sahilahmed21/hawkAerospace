@@ -1,9 +1,7 @@
 import { useEffect, useState } from "react";
-import { ThemeProvider, DarkTheme, DefaultTheme } from "@react-navigation/native";
+import { ThemeProvider, DefaultTheme } from "@react-navigation/native";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import { useColorScheme } from "@/hooks/useColorScheme";
-import "../i18n/i18n";
 import { I18nextProvider } from "react-i18next";
 import i18n from "@/i18n/i18n";
 import {
@@ -15,13 +13,21 @@ import {
   Inter_700Bold,
   Inter_900Black,
 } from "@expo-google-fonts/inter";
-
+import { UserProvider, useAuth } from "./contexts/UserContext";
 import WelcomeScreen from "./screens/WelcomeScreen";
 import OtpScreen from "./screens/OtpScreen";
 
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
+  return (
+    <UserProvider>
+      <RootLayoutNav />
+    </UserProvider>
+  );
+}
+
+function RootLayoutNav() {
   const [fontsLoaded] = useFonts({
     Inter_300Light,
     Inter_400Regular,
@@ -30,9 +36,8 @@ export default function RootLayout() {
     Inter_700Bold,
     Inter_900Black,
   });
-
-  // Remove useColorScheme hook since we're forcing light theme
-  const [step, setStep] = useState("welcome");
+  const { currentUser, loadingAuth } = useAuth();
+  const [appStep, setAppStep] = useState("loading");
 
   useEffect(() => {
     if (fontsLoaded) {
@@ -40,17 +45,28 @@ export default function RootLayout() {
     }
   }, [fontsLoaded]);
 
-  if (!fontsLoaded) return null;
+  useEffect(() => {
+    if (!loadingAuth && fontsLoaded) {
+      if (currentUser) {
+        setAppStep("main");
+      } else {
+        setAppStep("welcome");
+      }
+    }
+  }, [currentUser, loadingAuth, fontsLoaded]);
 
-  if (step === "welcome") {
-    return <WelcomeScreen onFinish={() => setStep("otp")} />;
+  if (appStep === "loading" || !fontsLoaded || loadingAuth) {
+    return null;
   }
 
-  if (step === "otp") {
-    return <OtpScreen onVerify={() => setStep("main")} />;
+  if (appStep === "welcome") {
+    return <WelcomeScreen onFinish={() => setAppStep("otp")} />;
   }
 
-  // Force DefaultTheme (light) for all devices
+  if (appStep === "otp") {
+    return <OtpScreen onVerify={() => setAppStep("main")} />;
+  }
+
   return (
     <ThemeProvider value={DefaultTheme}>
       <I18nextProvider i18n={i18n}>

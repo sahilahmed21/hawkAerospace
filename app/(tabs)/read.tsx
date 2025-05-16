@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
   Platform,
   Share,
   Alert,
+  ActivityIndicator,
   Easing
 } from 'react-native';
 import Icon from 'react-native-vector-icons/Feather';
@@ -20,6 +21,8 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 import { useTranslation } from 'react-i18next';
 import i18n from "@/i18n/i18n";
 import { useNavigation } from '@react-navigation/native';
+import firestore from '@react-native-firebase/firestore';
+import { useAuth } from '../contexts/UserContext';
 
 const LANGUAGES = [
   { code: 'en', label: 'English' },
@@ -32,50 +35,104 @@ const LANGUAGES = [
   { code: 'te', label: 'తెలుగు' },
 ];
 
-const ARTICLES = [
-  {
-    id: 1,
-    image: 'https://images.unsplash.com/photo-1501004318641-b39e6451bec6',
-    title: 'article1.title',
-    department: 'article1.department',
-    date: 'article1.date',
-    tags: ['article1.tag1', 'article1.tag2', 'article1.tag3'],
-    body: ['article1.body1', 'article1.body2'],
-    author: 'article1.author',
-    readTime: '5 min read',
-    likes: 42
-  },
-  {
-    id: 2,
-    image: 'https://images.unsplash.com/photo-1501004318641-b39e6451bec6',
-    title: 'article2.title',
-    department: 'article2.department',
-    date: 'article2.date',
-    tags: ['article2.tag1', 'article2.tag2'],
-    body: ['article2.body1', 'article2.body2', 'article2.body3'],
-    author: 'article2.author',
-    readTime: '7 min read',
-    likes: 18
-  }
-];
+interface Article {
+  id: string;
+  image: string;
+  title: string;
+  department: string;
+  date: string;
+  tags: string[];
+  body: string[];
+  author: string;
+  readTime: string;
+  firestoreLikes: number;
+  likedByCurrentUser: boolean;
+  bookmarkedByCurrentUser: boolean;
+}
 
 const ArticlePage = () => {
   const { t } = useTranslation();
   const navigation = useNavigation();
+  const { currentUser } = useAuth();
   const [menuVisible, setMenuVisible] = useState(false);
   const [currentArticleIndex, setCurrentArticleIndex] = useState(0);
-  const [bookmarked, setBookmarked] = useState(false);
-  const [liked, setLiked] = useState(false);
-  const [likeCount, setLikeCount] = useState(ARTICLES[0].likes);
+  const [isInteracting, setIsInteracting] = useState(false);
+  const [articlesData, setArticlesData] = useState<Article[]>([]);
+  const [loading, setLoading] = useState(true);
   const [likeAnimation] = useState(new Animated.Value(1));
   const pan = useRef(new Animated.ValueXY()).current;
   const { height, width } = Dimensions.get('window');
   const swipeThreshold = width * 0.3;
 
+  const fetchArticles = useCallback(() => {
+    setLoading(true);
+    const unsubscribe = firestore()
+      .collection('articles')
+      .where('isPublished', '==', true)
+      .orderBy('createdAt', 'desc')
+      .onSnapshot(querySnapshot => {
+        const fetchedArticles: Article[] = [];
+        querySnapshot.forEach(doc => {
+          const data = doc.data();
+          fetchedArticles.push({
+            id: doc.id,
+            image: data.image || 'https://images.unsplash.com/photo-1501004318641-b39e6451bec6',
+            title: data.title,
+            department: data.department,
+            date: data.date,
+            tags: data.tags || [],
+            body: data.body || [],
+            author: data.author,
+            readTime: data.readTime || '5 min read',
+            firestoreLikes: data.likeCount || 0,
+            likedByCurrentUser: false,
+            bookmarkedByCurrentUser: false
+          });
+        });
+        setArticlesData(fetchedArticles);
+        setLoading(false);
+      }, error => {
+        console.error("Error fetching articles:", error);
+        Alert.alert(t('error'), t('failed_to_load_articles'));
+        setLoading(false);
+      });
+    return unsubscribe;
+  }, [t]);
+
+  const fetchArticleInteractions = useCallback(async (articleId: string, index: number) => {
+    if (!currentUser) return;
+    try {
+      const articleRef = firestore().collection('articles').doc(articleId);
+      const articleDoc = await articleRef.get();
+      const firestoreLikes = articleDoc.exists ? articleDoc.data()?.likeCount || 0 : 0;
+
+      const interactionRef = articleRef.collection('userInteractions').doc(currentUser.uid);
+      const interactionDoc = await interactionRef.get();
+      const likedByCurrentUser = interactionDoc.exists ? interactionDoc.data()?.liked || false : false;
+      const bookmarkedByCurrentUser = interactionDoc.exists ? interactionDoc.data()?.bookmarked || false : false;
+
+      setArticlesData(prev => {
+        const newArticles = [...prev];
+        if (newArticles[index]) {
+          newArticles[index] = { ...newArticles[index], firestoreLikes, likedByCurrentUser, bookmarkedByCurrentUser };
+        }
+        return newArticles;
+      });
+    } catch (error) {
+      console.error("Error fetching article interactions:", error);
+    }
+  }, [currentUser]);
+
   useEffect(() => {
-    setLikeCount(ARTICLES[currentArticleIndex].likes);
-    setLiked(false);
-  }, [currentArticleIndex]);
+    const unsubscribe = fetchArticles();
+    return () => unsubscribe();
+  }, [fetchArticles]);
+
+  useEffect(() => {
+    if (articlesData.length > 0) {
+      fetchArticleInteractions(articlesData[currentArticleIndex].id, currentArticleIndex);
+    }
+  }, [currentArticleIndex, articlesData, fetchArticleInteractions]);
 
   const animateLike = () => {
     Animated.sequence([
@@ -94,11 +151,82 @@ const ArticlePage = () => {
     ]).start();
   };
 
-  const handleLike = () => {
-    const newLiked = !liked;
-    setLiked(newLiked);
-    setLikeCount(prev => newLiked ? prev + 1 : prev - 1);
-    animateLike();
+  const handleLike = async () => {
+    if (!currentUser || isInteracting) return;
+    setIsInteracting(true);
+
+    const article = articlesData[currentArticleIndex];
+    const newLikedStatus = !article.likedByCurrentUser;
+    const articleRef = firestore().collection('articles').doc(article.id);
+    const interactionRef = articleRef.collection('userInteractions').doc(currentUser.uid);
+
+    try {
+      await interactionRef.set(
+        { liked: newLikedStatus, lastInteractionAt: firestore.FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+
+      await firestore().runTransaction(async transaction => {
+        const freshArticleDoc = await transaction.get(articleRef);
+        if (!freshArticleDoc.exists) {
+          transaction.set(articleRef, { likeCount: newLikedStatus ? 1 : 0 });
+        } else {
+          const currentLikes = freshArticleDoc.data()?.likeCount || 0;
+          transaction.update(articleRef, { likeCount: newLikedStatus ? currentLikes + 1 : Math.max(0, currentLikes - 1) });
+        }
+      });
+
+      setArticlesData(prev => {
+        const newArticles = [...prev];
+        const currentLikes = newArticles[currentArticleIndex].firestoreLikes || 0;
+        newArticles[currentArticleIndex] = {
+          ...newArticles[currentArticleIndex],
+          likedByCurrentUser: newLikedStatus,
+          firestoreLikes: newLikedStatus ? currentLikes + 1 : Math.max(0, currentLikes - 1)
+        };
+        return newArticles;
+      });
+      animateLike();
+    } catch (error) {
+      console.error("Error liking article:", error);
+      Alert.alert(t('error'), t('failed_to_update_like'));
+    } finally {
+      setIsInteracting(false);
+    }
+  };
+
+  const toggleBookmark = async () => {
+    if (!currentUser || isInteracting) return;
+    setIsInteracting(true);
+
+    const article = articlesData[currentArticleIndex];
+    const newBookmarkedStatus = !article.bookmarkedByCurrentUser;
+    const interactionRef = firestore().collection('articles').doc(article.id).collection('userInteractions').doc(currentUser.uid);
+
+    try {
+      await interactionRef.set(
+        { bookmarked: newBookmarkedStatus, lastInteractionAt: firestore.FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+
+      setArticlesData(prev => {
+        const newArticles = [...prev];
+        newArticles[currentArticleIndex] = {
+          ...newArticles[currentArticleIndex],
+          bookmarkedByCurrentUser: newBookmarkedStatus
+        };
+        return newArticles;
+      });
+      Alert.alert(
+        newBookmarkedStatus ? t('addedBookmark') : t('removedBookmark'),
+        newBookmarkedStatus ? t('articleSaved') : t('articleRemoved')
+      );
+    } catch (error) {
+      console.error("Error bookmarking article:", error);
+      Alert.alert(t('error'), t('failed_to_update_bookmark'));
+    } finally {
+      setIsInteracting(false);
+    }
   };
 
   const changeLanguage = (code: string) => {
@@ -115,7 +243,7 @@ const ArticlePage = () => {
         }
       },
       onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dy > swipeThreshold && ARTICLES.length > 1) {
+        if (gestureState.dy > swipeThreshold && articlesData.length > 1) {
           loadNextArticle();
         } else {
           Animated.spring(pan, {
@@ -136,22 +264,15 @@ const ArticlePage = () => {
       useNativeDriver: true
     }).start(() => {
       pan.setValue({ x: 0, y: 0 });
-      setCurrentArticleIndex(prev => (prev + 1) % ARTICLES.length);
-      setBookmarked(false);
+      const nextIndex = (currentArticleIndex + 1) % articlesData.length;
+      setCurrentArticleIndex(nextIndex);
+      fetchArticleInteractions(articlesData[nextIndex].id, nextIndex);
     });
-  };
-
-  const toggleBookmark = () => {
-    setBookmarked(!bookmarked);
-    Alert.alert(
-      bookmarked ? t('removedBookmark') : t('addedBookmark'),
-      bookmarked ? t('articleRemoved') : t('articleSaved')
-    );
   };
 
   const shareArticle = async () => {
     try {
-      const article = ARTICLES[currentArticleIndex];
+      const article = articlesData[currentArticleIndex];
       await Share.share({
         title: t(article.title),
         message: `${t(article.title)}\n\n${t(article.body[0])?.substring(0, 100)}...\n\n${t('shareMore')}`,
@@ -161,97 +282,95 @@ const ArticlePage = () => {
     }
   };
 
-  const currentArticle = ARTICLES[currentArticleIndex];
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#4CAF50" />
+      </View>
+    );
+  }
+
+  if (articlesData.length === 0) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.body}>{t('no_articles_available')}</Text>
+      </View>
+    );
+  }
+
+  const currentArticleDisplay = articlesData[currentArticleIndex];
 
   return (
     <View style={styles.container}>
-      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.backButton}
           onPress={() => navigation.goBack()}
         >
           <Ionicons name="chevron-back" size={24} color="#000" />
           <Text style={styles.headerTitle}>{t('Read Page')}</Text>
         </TouchableOpacity>
-        
         <TouchableOpacity onPress={() => setMenuVisible(true)}>
           <Icon name="more-vertical" size={24} color="#000" />
         </TouchableOpacity>
       </View>
 
       <Animated.View
-        style={[
-          styles.articleContainer,
-          { transform: [{ translateY: pan.y }] }
-        ]}
+        style={[styles.articleContainer, { transform: [{ translateY: pan.y }] }]}
         {...panResponder.panHandlers}
       >
         <ScrollView>
           <Image
-            source={{ uri: currentArticle.image }}
+            source={{ uri: currentArticleDisplay.image }}
             style={styles.image}
             resizeMode="cover"
           />
-
           <View style={styles.content}>
-            <Text style={styles.title}>{t(currentArticle.title)}</Text>
-            
+            <Text style={styles.title}>{t(currentArticleDisplay.title)}</Text>
             <View style={styles.metaContainer}>
-              <Text style={styles.department}>{t(currentArticle.department)}</Text>
+              <Text style={styles.department}>{t(currentArticleDisplay.department)}</Text>
               <View style={styles.metaDivider} />
-              <Text style={styles.date}>{t(currentArticle.date)} • {t(currentArticle.readTime)}</Text>
+              <Text style={styles.date}>{t(currentArticleDisplay.date)} • {t(currentArticleDisplay.readTime)}</Text>
             </View>
-
-            <Text style={styles.author}>{t('by')} {t(currentArticle.author)}</Text>
-
+            <Text style={styles.author}>{t('by')} {t(currentArticleDisplay.author)}</Text>
             <View style={styles.tags}>
-              {currentArticle.tags.map((tag, index) => (
+              {currentArticleDisplay.tags.map((tag, index) => (
                 <Text key={index} style={styles.tag}>{t(tag)}</Text>
               ))}
             </View>
-
-            {currentArticle.body.map((paragraph, index) => (
+            {currentArticleDisplay.body.map((paragraph, index) => (
               <Text key={index} style={styles.body}>{t(paragraph)}</Text>
             ))}
           </View>
-
-          {/* Action Buttons */}
           <View style={styles.actionButtons}>
-            <TouchableOpacity 
-              style={styles.actionButton} 
-              onPress={handleLike}
-            >
+            <TouchableOpacity style={styles.actionButton} onPress={handleLike}>
               <Animated.View style={{ transform: [{ scale: likeAnimation }] }}>
-                <Icon 
-                  name={liked ? "heart" : "heart"} 
-                  size={24} 
-                  color={liked ? "#FF4081" : "#777"} 
+                <Icon
+                  name={currentArticleDisplay.likedByCurrentUser ? "heart" : "heart"}
+                  size={24}
+                  color={currentArticleDisplay.likedByCurrentUser ? "#FF4081" : "#777"}
                 />
               </Animated.View>
-              <Text style={[styles.actionText, liked && styles.likedText]}>
-                {likeCount}
+              <Text style={[styles.actionText, currentArticleDisplay.likedByCurrentUser && styles.likedText]}>
+                {currentArticleDisplay.firestoreLikes || 0}
               </Text>
             </TouchableOpacity>
-            
             <TouchableOpacity style={styles.actionButton} onPress={toggleBookmark}>
-              <Icon 
-                name={bookmarked ? "bookmark" : "bookmark"} 
-                size={24} 
-                color={bookmarked ? "#4CAF50" : "#777"} 
+              <Icon
+                name={currentArticleDisplay.bookmarkedByCurrentUser ? "bookmark" : "bookmark"}
+                size={24}
+                color={currentArticleDisplay.bookmarkedByCurrentUser ? "#4CAF50" : "#777"}
               />
               <Text style={styles.actionText}>
-                {bookmarked ? t('bookmarked') : t('bookmark')}
+                {currentArticleDisplay.bookmarkedByCurrentUser ? t('bookmarked') : t('bookmark')}
               </Text>
             </TouchableOpacity>
-            
             <TouchableOpacity style={styles.actionButton} onPress={shareArticle}>
               <Icon name="share-2" size={24} color="#777" />
               <Text style={styles.actionText}>{t('share')}</Text>
             </TouchableOpacity>
           </View>
-
-          {ARTICLES.length > 1 && (
+          {articlesData.length > 1 && (
             <View style={styles.swipeIndicator}>
               <Icon name="chevrons-down" size={24} color="#4CAF50" />
               <Text style={styles.swipeText}>{t('swipeForMore')}</Text>
@@ -260,17 +379,16 @@ const ArticlePage = () => {
         </ScrollView>
       </Animated.View>
 
-      {/* Language Modal */}
       <Modal visible={menuVisible} transparent animationType="fade">
-        <TouchableOpacity 
-          style={styles.modalOverlay} 
+        <TouchableOpacity
+          style={styles.modalOverlay}
           activeOpacity={1}
           onPress={() => setMenuVisible(false)}
         >
           <View style={styles.modalContent}>
             {LANGUAGES.map((lang) => (
-              <TouchableOpacity 
-                key={lang.code} 
+              <TouchableOpacity
+                key={lang.code}
                 style={styles.modalItem}
                 onPress={() => changeLanguage(lang.code)}
               >

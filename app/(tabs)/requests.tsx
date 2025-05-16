@@ -11,9 +11,11 @@ import {
   ScrollView,
   TextInput,
   Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import firestore, { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
+import { useAuth } from '../contexts/UserContext';
 import { Ionicons, MaterialCommunityIcons, AntDesign } from '@expo/vector-icons';
 import tw from '../../tailwind';
 import { useTranslation } from 'react-i18next';
@@ -27,19 +29,22 @@ type SprayRequestStatus =
 
 interface SprayRequest {
   id: string;
+  userId: string;
   address: string;
-  acres: string;
-  numberOfTanks: string;
-  tanksToSpray: string;
-  sprayingDate: string; // Format: "YYYY-MM-DD"
+  acres: number;
+  numberOfTanks: number;
+  tanksToSpray: number;
+  sprayingDate: FirebaseFirestoreTypes.Timestamp;
   agrochemical: string;
   crop: string;
   price: number;
   status: SprayRequestStatus;
-  createdAt: string; // ISOString
+  createdAt: FirebaseFirestoreTypes.Timestamp;
+  updatedAt?: FirebaseFirestoreTypes.Timestamp;
 }
 
 const Requests = (): JSX.Element => {
+  const { currentUser } = useAuth();
   const router = useRouter();
   const { t } = useTranslation();
   const params = useLocalSearchParams<{ refresh?: string }>();
@@ -63,67 +68,52 @@ const Requests = (): JSX.Element => {
     'Canceled', 'Out of Service', 'Rescheduled', 'Placed', 'Paid', 'On Hold',
   ];
 
-  const fetchRequests = useCallback(async (): Promise<void> => {
-    try {
-      setLoading(true);
-      const storedRequests = await AsyncStorage.getItem('sprayRequests');
-      if (storedRequests) {
-        setRequests(JSON.parse(storedRequests) as SprayRequest[]);
-      } else {
-        const sampleRequests: SprayRequest[] = [
-          {
-            id: '1',
-            address: '123 Farm Lane, Punjab',
-            acres: '10',
-            numberOfTanks: '2',
-            tanksToSpray: '1',
-            sprayingDate: '2025-07-15',
-            agrochemical: 'Glyphosate',
-            crop: 'Wheat',
-            price: 5000,
-            status: 'Pending',
-            createdAt: new Date().toISOString(),
-          },
-          {
-            id: '2',
-            address: '456 Agri Road, Haryana',
-            acres: '25',
-            numberOfTanks: '5',
-            tanksToSpray: '3',
-            sprayingDate: '2025-07-20',
-            agrochemical: 'Herbicide X',
-            crop: 'Cotton',
-            price: 12500,
-            status: 'Accepted',
-            createdAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-          },
-        ];
-        await AsyncStorage.setItem('sprayRequests', JSON.stringify(sampleRequests));
-        setRequests(sampleRequests);
-      }
-    } catch (error) {
-      console.error('Error fetching requests:', error);
-      Alert.alert(t('error'), t('failed_to_load_requests'));
-    } finally {
+  const fetchRequests = useCallback(() => {
+    if (!currentUser) {
+      setRequests([]);
       setLoading(false);
+      return;
     }
-  }, [t]);
+    setLoading(true);
+    const unsubscribe = firestore()
+      .collection('sprayRequests')
+      .where('userId', '==', currentUser.uid)
+      .orderBy('createdAt', 'desc')
+      .onSnapshot(querySnapshot => {
+        const fetchedRequests: SprayRequest[] = [];
+        querySnapshot.forEach(doc => {
+          fetchedRequests.push({ id: doc.id, ...doc.data() } as SprayRequest);
+        });
+        setRequests(fetchedRequests);
+        setLoading(false);
+      }, error => {
+        console.error('Error fetching requests:', error);
+        Alert.alert(t('error'), t('failed_to_load_requests'));
+        setLoading(false);
+      });
+
+    return unsubscribe;
+  }, [currentUser, t]);
 
   useEffect(() => {
-    fetchRequests();
+    const unsubscribe = fetchRequests();
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
   }, [fetchRequests]);
 
   useEffect(() => {
-    if (params.refresh === 'true') {
-      fetchRequests();
+    if (params.refresh === 'true' && !loading) {
+      // onSnapshot handles real-time updates, so manual refresh may not be needed
+      // If needed, could trigger a one-time .get() here
     }
-  }, [params.refresh, fetchRequests]);
+  }, [params.refresh, loading]);
 
-  const onRefresh = useCallback(async (): Promise<void> => {
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchRequests();
+    // Firestore onSnapshot handles real-time updates, so no need for manual fetch
     setRefreshing(false);
-  }, [fetchRequests]);
+  }, []);
 
   const handleRequestPress = (request: SprayRequest): void => {
     setSelectedRequest(request);
@@ -131,21 +121,21 @@ const Requests = (): JSX.Element => {
   };
 
   const handleUpdateStatus = useCallback(async (id: string, newStatus: SprayRequestStatus): Promise<void> => {
+    if (!currentUser) return;
     try {
-      const updatedRequests = requests.map((req) =>
-        req.id === id ? { ...req, status: newStatus } : req
-      );
-      await AsyncStorage.setItem('sprayRequests', JSON.stringify(updatedRequests));
-      setRequests(updatedRequests);
+      await firestore().collection('sprayRequests').doc(id).update({
+        status: newStatus,
+        updatedAt: firestore.FieldValue.serverTimestamp(),
+      });
       if (selectedRequest && selectedRequest.id === id) {
-        setSelectedRequest({ ...selectedRequest, status: newStatus });
+        setSelectedRequest(prev => prev ? { ...prev, status: newStatus } : null);
       }
       Alert.alert(t('success'), `${t('request_status_updated')} ${t(newStatus.toLowerCase().replace(/ /g, '_')) || newStatus}`);
     } catch (error) {
       console.error('Error updating request status:', error);
       Alert.alert(t('error'), t('failed_to_update_status'));
     }
-  }, [requests, selectedRequest, t]);
+  }, [currentUser, selectedRequest, t]);
 
   const getStatusStyle = (status: SprayRequestStatus): string => {
     const styles: Record<SprayRequestStatus, string> = {
@@ -157,12 +147,16 @@ const Requests = (): JSX.Element => {
     return styles[status] || 'bg-gray-500';
   };
 
-  const formatDate = (dateString: string): string => {
+  const formatDate = (timestamp: FirebaseFirestoreTypes.Timestamp | string): string => {
+    if (!timestamp) return t('invalid_date');
     try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) {
-        return t('invalid_date');
+      let date: Date;
+      if (typeof timestamp === 'string') {
+        date = new Date(timestamp);
+      } else {
+        date = (timestamp as FirebaseFirestoreTypes.Timestamp).toDate();
       }
+      if (isNaN(date.getTime())) return t('invalid_date');
       return date.toLocaleDateString(t('locale_code', { defaultValue: 'en-US' }), {
         year: 'numeric', month: 'short', day: 'numeric',
       });
@@ -176,7 +170,7 @@ const Requests = (): JSX.Element => {
     const day = date.getDate().toString().padStart(2, '0');
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
     const year = date.getFullYear();
-    return `${day}/${month}/${year}`; // DD/MM/YYYY
+    return `${day}/${month}/${year}`;
   };
 
   const openCalendar = (type: 'start' | 'end'): void => {
@@ -225,7 +219,7 @@ const Requests = (): JSX.Element => {
 
   const renderCalendarDay = (day: number | null, index: number): JSX.Element => {
     if (day === null) {
-      return <View key={index} style={tw`w-[${100/7}%] aspect-square`} />;
+      return <View key={index} style={tw`w-[${100 / 7}%] aspect-square`} />;
     }
     const date = new Date(selectedMonth.getFullYear(), selectedMonth.getMonth(), day);
     const isSelected = selectedDate &&
@@ -236,7 +230,7 @@ const Requests = (): JSX.Element => {
     return (
       <TouchableOpacity
         key={index}
-        style={tw`w-[${100/7}%] aspect-square items-center justify-center ${isSelected ? 'bg-blue-600 rounded-full' : ''}`}
+        style={tw`w-[${100 / 7}%] aspect-square items-center justify-center ${isSelected ? 'bg-blue-600 rounded-full' : ''}`}
         onPress={() => setSelectedDate(date)}
         accessibilityLabel={`${t('select_date')} ${date.toLocaleDateString()}`}
       >
@@ -248,7 +242,7 @@ const Requests = (): JSX.Element => {
   const renderWeekdayHeaders = (): JSX.Element[] => {
     const weekdays = [t('mon'), t('tue'), t('wed'), t('thu'), t('fri'), t('sat'), t('sun')];
     return weekdays.map((dayAbbr, index) => (
-      <View key={index} style={tw`w-[${100/7}%] items-center p-2 mb-1`}>
+      <View key={index} style={tw`w-[${100 / 7}%] items-center p-2 mb-1`}>
         <Text style={tw`font-semibold text-gray-600 text-xs`}>{dayAbbr}</Text>
       </View>
     ));
@@ -285,7 +279,7 @@ const Requests = (): JSX.Element => {
         request.address.toLowerCase().includes(query) ||
         request.crop.toLowerCase().includes(query) ||
         request.agrochemical.toLowerCase().includes(query) ||
-        request.sprayingDate.toLowerCase().includes(query) ||
+        request.sprayingDate.toString().toLowerCase().includes(query) ||
         requestDateFormatted.includes(query) ||
         requestPriceStr.includes(query)
       )) {
@@ -296,7 +290,7 @@ const Requests = (): JSX.Element => {
       return false;
     }
     if (request.sprayingDate) {
-      const requestDate = new Date(new Date(request.sprayingDate).setHours(0, 0, 0, 0));
+      const requestDate = new Date(request.sprayingDate.toDate().setHours(0, 0, 0, 0));
       if (filterStartDate && requestDate < filterStartDate) {
         return false;
       }
@@ -349,7 +343,7 @@ const Requests = (): JSX.Element => {
         onPress={() =>
           searchQuery.trim() || filterStatus || filterStartDate || filterEndDate
             ? clearAllFilters()
-            : router.push('/(tabs)/spraying')
+            : router.push('/Spraying')
         }
         accessibilityLabel={
           searchQuery.trim() || filterStatus || filterStartDate || filterEndDate
@@ -589,6 +583,15 @@ const Requests = (): JSX.Element => {
     </Modal>
   );
 
+  if (loading && requests.length === 0) {
+    return (
+      <SafeAreaView style={tw`flex-1 bg-gray-100 justify-center items-center`}>
+        <ActivityIndicator size="large" color={tw.color('blue-600') as string} />
+        <Text style={tw`text-lg text-gray-500 mt-3`}>{t('loading_requests')}</Text>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={tw`flex-1 bg-gray-100`}>
       <View style={tw`bg-white p-4 border-b border-gray-200 flex-row justify-between items-center shadow-sm`}>
@@ -641,35 +644,28 @@ const Requests = (): JSX.Element => {
           </TouchableOpacity>
         </View>
       )}
-      {loading && requests.length === 0 ? (
-        <View style={tw`flex-1 justify-center items-center`}>
-          <MaterialCommunityIcons name="tractor-variant" size={48} color={tw.color('blue-500') as string} style={tw`mb-4 opacity-70`} />
-          <Text style={tw`text-lg text-gray-500`}>{t('loading_requests')}</Text>
-        </View>
-      ) : (
-        <FlatList
-          data={filteredRequests}
-          renderItem={renderRequestItem}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={tw`p-4 ${filteredRequests.length === 0 ? 'flex-1 bg-gray-100' : 'bg-gray-100'}`}
-          ListEmptyComponent={!loading ? renderEmptyList : null}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              colors={[tw.color('blue-600') as string]}
-              tintColor={tw.color('blue-600') as string}
-            />
-          }
-          showsVerticalScrollIndicator={false}
-        />
-      )}
+      <FlatList
+        data={filteredRequests}
+        renderItem={renderRequestItem}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={tw`p-4 ${filteredRequests.length === 0 ? 'flex-1 bg-gray-100' : 'bg-gray-100'}`}
+        ListEmptyComponent={!loading ? renderEmptyList : null}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={[tw.color('blue-600') as string]}
+            tintColor={tw.color('blue-600') as string}
+          />
+        }
+        showsVerticalScrollIndicator={false}
+      />
       <RequestDetailModal />
       <FilterModal />
       <CalendarModal />
       <TouchableOpacity
         style={tw`absolute right-5 bottom-5 bg-blue-600 w-14 h-14 rounded-full items-center justify-center shadow-lg active:bg-blue-700`}
-        onPress={() => router.push('/(tabs)/spraying')}
+        onPress={() => router.push('/Spraying')}
         accessibilityLabel={t('create_new_spray_request_fab')}
         accessibilityRole="button"
       >
