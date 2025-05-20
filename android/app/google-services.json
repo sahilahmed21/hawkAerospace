@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "124625906969",
+    "project_id": "hawkaerospace-64d6f",
+    "storage_bucket": "hawkaerospace-64d6f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:124625906969:android:e9c382df1dfa26236e2988",
+        "android_client_info": {
+          "package_name": "com.anonymous.user"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAyinqrU0Sj8rFytVAh1a38znOI0XmGLTo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

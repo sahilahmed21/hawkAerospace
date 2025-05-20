@@ -4,7 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
 import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
-import { useAuth } from '@/contexts/UserContext';
+import { useAuth } from '../contexts/UserContext';
 
 const Profile = () => {
   const { currentUser } = useAuth();
