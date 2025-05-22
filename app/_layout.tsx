@@ -1,3 +1,6 @@
+import React from "react";
+import 'react-native-get-random-values';
+
 import { useEffect, useState } from "react";
 import { ThemeProvider, DefaultTheme } from "@react-navigation/native";
 import { Stack } from "expo-router";
@@ -76,7 +79,7 @@ function RootLayoutNav() {
           <Stack.Screen name="location" options={{ title: "Select Location" }} />
           <Stack.Screen name="notification" options={{ title: "Notification" }} />
           <Stack.Screen name="fieldlocation" options={{ title: "FieldLocation" }} />
-          <Stack.Screen name="settings" options={{ headerShown: false }} />
+          <Stack.Screen name="screens/settings" options={{ title: "Settings" }} />
         </Stack>
       </I18nextProvider>
     </ThemeProvider>

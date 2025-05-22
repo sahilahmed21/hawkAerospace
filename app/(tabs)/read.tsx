@@ -1,552 +1,280 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+// app/(tabs)/read.tsx
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  Image,
-  TouchableOpacity,
-  Modal,
-  ScrollView,
-  Animated,
-  PanResponder,
-  Dimensions,
-  Platform,
-  Share,
-  Alert,
-  ActivityIndicator,
-  Easing
+  View, Text, FlatList, Image, TouchableOpacity, Linking,
+  ActivityIndicator, StyleSheet, Alert, SafeAreaView
 } from 'react-native';
-import Icon from 'react-native-vector-icons/Feather';
-import Ionicons from 'react-native-vector-icons/Ionicons';
-import { useTranslation } from 'react-i18next';
-import i18n from "@/i18n/i18n";
-import { useNavigation } from '@react-navigation/native';
+import { useAuth } from '../contexts/UserContext'; // Adjust path if needed
 import firestore from '@react-native-firebase/firestore';
-import { useAuth } from '../contexts/UserContext';
+import { Ionicons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
+import tw from '@/tailwind'; // Adjust path if needed
+import { Stack } from 'expo-router';
 
-const LANGUAGES = [
-  { code: 'en', label: 'English' },
-  { code: 'hi', label: 'हिंदी' },
-  { code: 'gu', label: 'ગુજરાતી' },
-  { code: 'ka', label: 'ಕನ್ನಡ' },
-  { code: 'ma', label: 'मराठी' },
-  { code: 'pu', label: 'ਪੰਜਾਬੀ' },
-  { code: 'ta', label: 'தமிழ்' },
-  { code: 'te', label: 'తెలుగు' },
-];
+const NEWS_API_KEY = 'b6d8beb3cce94a0b864a957417cd8b82'; // <-- REPLACE THIS!
+const ARTICLES_PER_PAGE = 20;
 
-interface Article {
-  id: string;
-  image: string;
+interface NewsApiArticle {
+  source: { id: string | null; name: string };
+  author: string | null;
   title: string;
-  department: string;
-  date: string;
-  tags: string[];
-  body: string[];
-  author: string;
-  readTime: string;
-  firestoreLikes: number;
-  likedByCurrentUser: boolean;
-  bookmarkedByCurrentUser: boolean;
+  description: string | null;
+  url: string;
+  urlToImage: string | null;
+  publishedAt: string;
+  content: string | null;
 }
 
-const ArticlePage = () => {
+interface Article extends NewsApiArticle {
+  id: string; // We'll use the URL as a unique ID for our purposes
+  isLikedByCurrentUser?: boolean;
+}
+
+// Function to create a Firestore-safe ID from a URL
+const getArticleDocId = (url: string): string => {
+  // Replace characters not allowed in Firestore document IDs
+  // This is a basic example; a more robust hashing might be better for very long/complex URLs
+  return url.replace(/[.#$[\]/]/g, '_');
+};
+
+export default function ReadScreen() {
   const { t } = useTranslation();
-  const navigation = useNavigation();
   const { currentUser } = useAuth();
-  const [menuVisible, setMenuVisible] = useState(false);
-  const [currentArticleIndex, setCurrentArticleIndex] = useState(0);
-  const [isInteracting, setIsInteracting] = useState(false);
-  const [articlesData, setArticlesData] = useState<Article[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [likeAnimation] = useState(new Animated.Value(1));
-  const pan = useRef(new Animated.ValueXY()).current;
-  const { height, width } = Dimensions.get('window');
-  const swipeThreshold = width * 0.3;
 
-  const fetchArticles = useCallback(() => {
-    setLoading(true);
-    const unsubscribe = firestore()
-      .collection('articles')
-      .where('isPublished', '==', true)
-      .orderBy('createdAt', 'desc')
-      .onSnapshot(querySnapshot => {
-        const fetchedArticles: Article[] = [];
-        querySnapshot.forEach(doc => {
-          const data = doc.data();
-          fetchedArticles.push({
-            id: doc.id,
-            image: data.image || 'https://images.unsplash.com/photo-1501004318641-b39e6451bec6',
-            title: data.title,
-            department: data.department,
-            date: data.date,
-            tags: data.tags || [],
-            body: data.body || [],
-            author: data.author,
-            readTime: data.readTime || '5 min read',
-            firestoreLikes: data.likeCount || 0,
-            likedByCurrentUser: false,
-            bookmarkedByCurrentUser: false
-          });
-        });
-        setArticlesData(fetchedArticles);
-        setLoading(false);
-      }, error => {
-        console.error("Error fetching articles:", error);
-        Alert.alert(t('error'), t('failed_to_load_articles'));
-        setLoading(false);
-      });
-    return unsubscribe;
-  }, [t]);
+  const [articles, setArticles] = useState<Article[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMoreArticles, setHasMoreArticles] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [likedArticleIds, setLikedArticleIds] = useState<Set<string>>(new Set());
 
-  const fetchArticleInteractions = useCallback(async (articleId: string, index: number) => {
+  const fetchUserLikes = useCallback(async () => {
     if (!currentUser) return;
     try {
-      const articleRef = firestore().collection('articles').doc(articleId);
-      const articleDoc = await articleRef.get();
-      const firestoreLikes = articleDoc.exists ? articleDoc.data()?.likeCount || 0 : 0;
+      const userLikesSnapshot = await firestore()
+        .collection('users')
+        .doc(currentUser.uid)
+        .collection('likedArticles')
+        .get();
 
-      const interactionRef = articleRef.collection('userInteractions').doc(currentUser.uid);
-      const interactionDoc = await interactionRef.get();
-      const likedByCurrentUser = interactionDoc.exists ? interactionDoc.data()?.liked || false : false;
-      const bookmarkedByCurrentUser = interactionDoc.exists ? interactionDoc.data()?.bookmarked || false : false;
-
-      setArticlesData(prev => {
-        const newArticles = [...prev];
-        if (newArticles[index]) {
-          newArticles[index] = { ...newArticles[index], firestoreLikes, likedByCurrentUser, bookmarkedByCurrentUser };
-        }
-        return newArticles;
+      const likedIds = new Set<string>();
+      userLikesSnapshot.forEach(doc => {
+        // Assuming doc.id is the sanitized article URL (our article.id)
+        likedIds.add(doc.id);
       });
-    } catch (error) {
-      console.error("Error fetching article interactions:", error);
+      setLikedArticleIds(likedIds);
+    } catch (e) {
+      console.error("Error fetching user likes:", e);
     }
   }, [currentUser]);
 
   useEffect(() => {
-    const unsubscribe = fetchArticles();
-    return () => unsubscribe();
-  }, [fetchArticles]);
+    fetchUserLikes();
+  }, [fetchUserLikes]);
+
+  const fetchArticlesFromAPI = useCallback(async (pageNum: number) => {
+    if (!hasMoreArticles && pageNum > 1) return; // Don't fetch if no more and not the first page
+
+    console.log(`Fetching articles, page: ${pageNum}`);
+    setError(null);
+    if (pageNum === 1) setLoading(true);
+    else setLoadingMore(true);
+
+    const keywords = "agriculture OR agritech OR \"farm technology\" OR \"precision farming\" OR \"sustainable farming\"";
+    const url = `https://newsapi.org/v2/everything?q=(${keywords})&sortBy=publishedAt&language=en&pageSize=${ARTICLES_PER_PAGE}&page=${pageNum}&apiKey=${NEWS_API_KEY}`;
+
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+
+      if (data.status === 'error') {
+        throw new Error(data.message || 'Failed to fetch articles from News API');
+      }
+
+      if (data.articles && data.articles.length > 0) {
+        const newArticles: Article[] = data.articles
+          .filter((art: NewsApiArticle) => art.url && art.title && art.urlToImage) // Basic filter for usable articles
+          .map((art: NewsApiArticle) => ({
+            ...art,
+            id: getArticleDocId(art.url), // Use sanitized URL as our internal ID
+            isLikedByCurrentUser: likedArticleIds.has(getArticleDocId(art.url)),
+          }));
+
+        setArticles(prev => pageNum === 1 ? newArticles : [...prev, ...newArticles]);
+        setHasMoreArticles(newArticles.length === ARTICLES_PER_PAGE);
+      } else {
+        setHasMoreArticles(false);
+        if (pageNum === 1) setArticles([]); // Clear if first page has no results
+      }
+    } catch (e: any) {
+      console.error("Error fetching articles:", e);
+      setError(e.message || t('failed_to_load_articles'));
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }, [hasMoreArticles, likedArticleIds, t]); // Include likedArticleIds so articles re-evaluate like status if likes load later
 
   useEffect(() => {
-    if (articlesData.length > 0) {
-      fetchArticleInteractions(articlesData[currentArticleIndex].id, currentArticleIndex);
+    fetchArticlesFromAPI(1); // Initial fetch
+  }, [fetchArticlesFromAPI]); // fetchArticlesFromAPI is memoized with likedArticleIds as dependency
+
+  const handleLikeToggle = async (article: Article) => {
+    if (!currentUser) {
+      Alert.alert(t('login_required'), t('please_login_to_like'));
+      return;
     }
-  }, [currentArticleIndex, articlesData, fetchArticleInteractions]);
 
-  const animateLike = () => {
-    Animated.sequence([
-      Animated.timing(likeAnimation, {
-        toValue: 1.5,
-        duration: 150,
-        easing: Easing.ease,
-        useNativeDriver: true
-      }),
-      Animated.timing(likeAnimation, {
-        toValue: 1,
-        duration: 150,
-        easing: Easing.ease,
-        useNativeDriver: true
-      })
-    ]).start();
-  };
+    const articleDocId = article.id; // This is already the sanitized ID
+    const userLikesRef = firestore()
+      .collection('users')
+      .doc(currentUser.uid)
+      .collection('likedArticles')
+      .doc(articleDocId);
 
-  const handleLike = async () => {
-    if (!currentUser || isInteracting) return;
-    setIsInteracting(true);
-
-    const article = articlesData[currentArticleIndex];
-    const newLikedStatus = !article.likedByCurrentUser;
-    const articleRef = firestore().collection('articles').doc(article.id);
-    const interactionRef = articleRef.collection('userInteractions').doc(currentUser.uid);
+    const newLikedStatus = !article.isLikedByCurrentUser;
 
     try {
-      await interactionRef.set(
-        { liked: newLikedStatus, lastInteractionAt: firestore.FieldValue.serverTimestamp() },
-        { merge: true }
-      );
-
-      await firestore().runTransaction(async transaction => {
-        const freshArticleDoc = await transaction.get(articleRef);
-        if (!freshArticleDoc.exists) {
-          transaction.set(articleRef, { likeCount: newLikedStatus ? 1 : 0 });
-        } else {
-          const currentLikes = freshArticleDoc.data()?.likeCount || 0;
-          transaction.update(articleRef, { likeCount: newLikedStatus ? currentLikes + 1 : Math.max(0, currentLikes - 1) });
-        }
-      });
-
-      setArticlesData(prev => {
-        const newArticles = [...prev];
-        const currentLikes = newArticles[currentArticleIndex].firestoreLikes || 0;
-        newArticles[currentArticleIndex] = {
-          ...newArticles[currentArticleIndex],
-          likedByCurrentUser: newLikedStatus,
-          firestoreLikes: newLikedStatus ? currentLikes + 1 : Math.max(0, currentLikes - 1)
-        };
-        return newArticles;
-      });
-      animateLike();
-    } catch (error) {
-      console.error("Error liking article:", error);
-      Alert.alert(t('error'), t('failed_to_update_like'));
-    } finally {
-      setIsInteracting(false);
-    }
-  };
-
-  const toggleBookmark = async () => {
-    if (!currentUser || isInteracting) return;
-    setIsInteracting(true);
-
-    const article = articlesData[currentArticleIndex];
-    const newBookmarkedStatus = !article.bookmarkedByCurrentUser;
-    const interactionRef = firestore().collection('articles').doc(article.id).collection('userInteractions').doc(currentUser.uid);
-
-    try {
-      await interactionRef.set(
-        { bookmarked: newBookmarkedStatus, lastInteractionAt: firestore.FieldValue.serverTimestamp() },
-        { merge: true }
-      );
-
-      setArticlesData(prev => {
-        const newArticles = [...prev];
-        newArticles[currentArticleIndex] = {
-          ...newArticles[currentArticleIndex],
-          bookmarkedByCurrentUser: newBookmarkedStatus
-        };
-        return newArticles;
-      });
-      Alert.alert(
-        newBookmarkedStatus ? t('addedBookmark') : t('removedBookmark'),
-        newBookmarkedStatus ? t('articleSaved') : t('articleRemoved')
-      );
-    } catch (error) {
-      console.error("Error bookmarking article:", error);
-      Alert.alert(t('error'), t('failed_to_update_bookmark'));
-    } finally {
-      setIsInteracting(false);
-    }
-  };
-
-  const changeLanguage = (code: string) => {
-    i18n.changeLanguage(code);
-    setMenuVisible(false);
-  };
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        if (gestureState.dy > 0) {
-          pan.setValue({ x: 0, y: gestureState.dy });
-        }
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dy > swipeThreshold && articlesData.length > 1) {
-          loadNextArticle();
-        } else {
-          Animated.spring(pan, {
-            toValue: { x: 0, y: 0 },
-            friction: 5,
-            useNativeDriver: true
-          }).start();
-        }
+      if (newLikedStatus) {
+        await userLikesRef.set({
+          url: article.url, // Store original URL for reference
+          title: article.title,
+          likedAt: firestore.FieldValue.serverTimestamp(),
+          // You can add article.urlToImage, article.source.name if needed
+        });
+      } else {
+        await userLikesRef.delete();
       }
-    })
-  ).current;
 
-  const loadNextArticle = () => {
-    Animated.timing(pan, {
-      toValue: { x: 0, y: height },
-      duration: 300,
-      easing: Easing.out(Easing.exp),
-      useNativeDriver: true
-    }).start(() => {
-      pan.setValue({ x: 0, y: 0 });
-      const nextIndex = (currentArticleIndex + 1) % articlesData.length;
-      setCurrentArticleIndex(nextIndex);
-      fetchArticleInteractions(articlesData[nextIndex].id, nextIndex);
+      // Update local state optimistically
+      setArticles(prevArticles =>
+        prevArticles.map(art =>
+          art.id === article.id ? { ...art, isLikedByCurrentUser: newLikedStatus } : art
+        )
+      );
+      setLikedArticleIds(prev => {
+        const newSet = new Set(prev);
+        if (newLikedStatus) newSet.add(articleDocId);
+        else newSet.delete(articleDocId);
+        return newSet;
+      });
+
+    } catch (e) {
+      console.error("Error toggling like:", e);
+      Alert.alert(t('error'), t('failed_to_update_like'));
+    }
+  };
+
+  const openArticleUrl = (url: string) => {
+    Linking.canOpenURL(url).then(supported => {
+      if (supported) {
+        Linking.openURL(url);
+      } else {
+        Alert.alert(t('error'), `${t('cannot_open_url')}: ${url}`);
+      }
+    }).catch(err => {
+      console.error("Error opening URL", err);
+      Alert.alert(t('error'), t('failed_to_open_link'));
     });
   };
 
-  const shareArticle = async () => {
-    try {
-      const article = articlesData[currentArticleIndex];
-      await Share.share({
-        title: t(article.title),
-        message: `${t(article.title)}\n\n${t(article.body[0])?.substring(0, 100)}...\n\n${t('shareMore')}`,
+  const renderArticleItem = ({ item }: { item: Article }) => (
+    <TouchableOpacity
+      style={[tw`bg-white mb-4 rounded-lg shadow-lg overflow-hidden`, styles.articleCard]}
+      onPress={() => openArticleUrl(item.url)}
+    >
+      {item.urlToImage && (
+        <Image source={{ uri: item.urlToImage }} style={styles.articleImage} resizeMode="cover" />
+      )}
+      <View style={tw`p-4`}>
+        <Text style={[tw`text-lg font-semibold text-gray-800 mb-1`, { fontFamily: "Inter_600SemiBold" }]}>{item.title}</Text>
+        {item.source?.name && <Text style={tw`text-xs text-gray-500 mb-2`}>{item.source.name} - {new Date(item.publishedAt).toLocaleDateString()}</Text>}
+        <Text style={[tw`text-sm text-gray-700 mb-3`, { fontFamily: "Inter_400Regular" }]} numberOfLines={3}>
+          {item.description || item.content?.substring(0, 150) || t('no_description')}
+        </Text>
+        <View style={tw`flex-row justify-between items-center`}>
+          <TouchableOpacity onPress={() => handleLikeToggle(item)} style={tw`p-2 -ml-2`}>
+            <Ionicons
+              name={item.isLikedByCurrentUser ? "heart" : "heart-outline"}
+              size={26}
+              color={item.isLikedByCurrentUser ? tw.color('red-500') : tw.color('gray-600')}
+            />
+          </TouchableOpacity>
+          <Text style={tw`text-blue-600 font-medium`} onPress={() => openArticleUrl(item.url)}>
+            {t('read_full_article')}
+          </Text>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+
+  const loadMoreArticles = () => {
+    if (!loadingMore && hasMoreArticles) {
+      setPage(prevPage => {
+        const nextPage = prevPage + 1;
+        fetchArticlesFromAPI(nextPage);
+        return nextPage;
       });
-    } catch (error) {
-      console.error('Error sharing:', error);
     }
   };
 
-  if (loading) {
+  if (loading && page === 1) {
     return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color="#4CAF50" />
-      </View>
+      <SafeAreaView style={tw`flex-1 justify-center items-center bg-gray-100`}>
+        <ActivityIndicator size="large" color={tw.color('blue-600')} />
+        <Text style={tw`mt-2 text-gray-600`}>{t('loading_articles')}</Text>
+      </SafeAreaView>
     );
   }
 
-  if (articlesData.length === 0) {
+  if (error && articles.length === 0) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.body}>{t('no_articles_available')}</Text>
-      </View>
+      <SafeAreaView style={tw`flex-1 justify-center items-center bg-gray-100 p-5`}>
+        <Ionicons name="alert-circle-outline" size={48} color={tw.color('red-500')} />
+        <Text style={tw`mt-3 text-lg text-red-600 text-center font-semibold`}>{t('error_occurred')}</Text>
+        <Text style={tw`mt-1 text-gray-700 text-center`}>{error}</Text>
+        <TouchableOpacity
+          onPress={() => { setPage(1); fetchArticlesFromAPI(1); }}
+          style={tw`mt-4 bg-blue-500 px-6 py-2 rounded-lg`}
+        >
+          <Text style={tw`text-white font-medium`}>{t('retry')}</Text>
+        </TouchableOpacity>
+      </SafeAreaView>
     );
   }
-
-  const currentArticleDisplay = articlesData[currentArticleIndex];
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity
-          style={styles.backButton}
-          onPress={() => navigation.goBack()}
-        >
-          <Ionicons name="chevron-back" size={24} color="#000" />
-          <Text style={styles.headerTitle}>{t('Read Page')}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => setMenuVisible(true)}>
-          <Icon name="more-vertical" size={24} color="#000" />
-        </TouchableOpacity>
-      </View>
-
-      <Animated.View
-        style={[styles.articleContainer, { transform: [{ translateY: pan.y }] }]}
-        {...panResponder.panHandlers}
-      >
-        <ScrollView>
-          <Image
-            source={{ uri: currentArticleDisplay.image }}
-            style={styles.image}
-            resizeMode="cover"
-          />
-          <View style={styles.content}>
-            <Text style={styles.title}>{t(currentArticleDisplay.title)}</Text>
-            <View style={styles.metaContainer}>
-              <Text style={styles.department}>{t(currentArticleDisplay.department)}</Text>
-              <View style={styles.metaDivider} />
-              <Text style={styles.date}>{t(currentArticleDisplay.date)} • {t(currentArticleDisplay.readTime)}</Text>
+    <SafeAreaView style={tw`flex-1 bg-gray-100`}>
+      <Stack.Screen options={{ title: t('read_latest_agritech') }} />
+      <FlatList
+        data={articles}
+        renderItem={renderArticleItem}
+        keyExtractor={(item) => item.url} // URL should be unique
+        contentContainerStyle={tw`p-4`}
+        onEndReached={loadMoreArticles}
+        onEndReachedThreshold={0.5}
+        ListFooterComponent={loadingMore ? <ActivityIndicator size="small" color={tw.color('gray-500')} style={tw`my-4`} /> : null}
+        ListEmptyComponent={
+          !loading && !error ? (
+            <View style={tw`flex-1 justify-center items-center mt-20`}>
+              <Ionicons name="newspaper-outline" size={60} color={tw.color('gray-400')} />
+              <Text style={tw`mt-4 text-lg text-gray-500`}>{t('no_articles_found')}</Text>
+              <Text style={tw`mt-1 text-sm text-gray-400`}>{t('try_again_later_or_check_keywords')}</Text>
             </View>
-            <Text style={styles.author}>{t('by')} {t(currentArticleDisplay.author)}</Text>
-            <View style={styles.tags}>
-              {currentArticleDisplay.tags.map((tag, index) => (
-                <Text key={index} style={styles.tag}>{t(tag)}</Text>
-              ))}
-            </View>
-            {currentArticleDisplay.body.map((paragraph, index) => (
-              <Text key={index} style={styles.body}>{t(paragraph)}</Text>
-            ))}
-          </View>
-          <View style={styles.actionButtons}>
-            <TouchableOpacity style={styles.actionButton} onPress={handleLike}>
-              <Animated.View style={{ transform: [{ scale: likeAnimation }] }}>
-                <Icon
-                  name={currentArticleDisplay.likedByCurrentUser ? "heart" : "heart"}
-                  size={24}
-                  color={currentArticleDisplay.likedByCurrentUser ? "#FF4081" : "#777"}
-                />
-              </Animated.View>
-              <Text style={[styles.actionText, currentArticleDisplay.likedByCurrentUser && styles.likedText]}>
-                {currentArticleDisplay.firestoreLikes || 0}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton} onPress={toggleBookmark}>
-              <Icon
-                name={currentArticleDisplay.bookmarkedByCurrentUser ? "bookmark" : "bookmark"}
-                size={24}
-                color={currentArticleDisplay.bookmarkedByCurrentUser ? "#4CAF50" : "#777"}
-              />
-              <Text style={styles.actionText}>
-                {currentArticleDisplay.bookmarkedByCurrentUser ? t('bookmarked') : t('bookmark')}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton} onPress={shareArticle}>
-              <Icon name="share-2" size={24} color="#777" />
-              <Text style={styles.actionText}>{t('share')}</Text>
-            </TouchableOpacity>
-          </View>
-          {articlesData.length > 1 && (
-            <View style={styles.swipeIndicator}>
-              <Icon name="chevrons-down" size={24} color="#4CAF50" />
-              <Text style={styles.swipeText}>{t('swipeForMore')}</Text>
-            </View>
-          )}
-        </ScrollView>
-      </Animated.View>
-
-      <Modal visible={menuVisible} transparent animationType="fade">
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setMenuVisible(false)}
-        >
-          <View style={styles.modalContent}>
-            {LANGUAGES.map((lang) => (
-              <TouchableOpacity
-                key={lang.code}
-                style={styles.modalItem}
-                onPress={() => changeLanguage(lang.code)}
-              >
-                <Text style={styles.modalItemText}>{lang.label}</Text>
-                {i18n.language === lang.code && (
-                  <Icon name="check" size={20} color="#4CAF50" />
-                )}
-              </TouchableOpacity>
-            ))}
-          </View>
-        </TouchableOpacity>
-      </Modal>
-    </View>
+          ) : null
+        }
+      />
+    </SafeAreaView>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
+  articleCard: {
+    // elevation: 3, // For Android shadow
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: Platform.OS === 'ios' ? 50 : 20,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  backButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginLeft: 8,
-    color: '#000',
-  },
-  articleContainer: {
-    flex: 1,
-  },
-  image: {
+  articleImage: {
     width: '100%',
-    height: 250,
-  },
-  content: {
-    padding: 20,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 8,
-    color: '#222',
-    lineHeight: 30,
-  },
-  metaContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  department: {
-    color: '#4CAF50',
-    fontWeight: '600',
-    fontSize: 14,
-  },
-  metaDivider: {
-    width: 1,
-    height: 12,
-    backgroundColor: '#ccc',
-    marginHorizontal: 8,
-  },
-  date: {
-    color: '#777',
-    fontSize: 14,
-  },
-  author: {
-    color: '#777',
-    fontSize: 14,
-    marginBottom: 16,
-  },
-  tags: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: 20,
-    gap: 8,
-  },
-  tag: {
-    backgroundColor: '#E0F2E9',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-    fontSize: 12,
-    color: '#2e7d32',
-  },
-  body: {
-    marginBottom: 20,
-    color: '#444',
-    fontSize: 16,
-    lineHeight: 24,
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    paddingVertical: 16,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: '#eee',
-    marginHorizontal: 20,
-  },
-  actionButton: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 8,
-  },
-  actionText: {
-    color: '#555',
-    fontSize: 14,
-  },
-  likedText: {
-    color: '#FF4081',
-    fontWeight: 'bold',
-  },
-  swipeIndicator: {
-    alignItems: 'center',
-    paddingVertical: 20,
-    marginBottom: 30,
-  },
-  swipeText: {
-    color: '#4CAF50',
-    marginTop: 5,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    padding: 20,
-  },
-  modalItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  modalItemText: {
-    fontSize: 16,
-    color: '#333',
+    height: 180,
   },
 });
-
-export default ArticlePage;

@@ -1,107 +1,143 @@
-import { useEffect, useState } from 'react';
-import * as Location from 'expo-location';
-import { Alert } from 'react-native';
+// hooks/useLocation.ts
+import { useState, useEffect, useCallback } from 'react';
+import * as LocationExpo from 'expo-location';
+import { Alert } from 'react-native'; // For showing permission alerts
 
-interface LocationHook {
-  location: Location.LocationObject | null;
-  address: Location.LocationGeocodedAddress | null;
-  errorMsg: string | null;
-  requestLocationPermission: () => Promise<void>;
+export interface UserCoords {
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null; // expo-location provides this
 }
 
-export function useLocation(): LocationHook {
-  const [location, setLocation] = useState<Location.LocationObject | null>(null);
-  const [address, setAddress] = useState<Location.LocationGeocodedAddress | null>(null);
+export interface SavedAddressData {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  address: string;
+}
+
+
+export interface FullAddress {
+  streetNumber?: string | null;
+  street?: string | null;
+  district?: string | null; // For some regions
+  city?: string | null;
+  subregion?: string | null; // County / Sub-administrative area
+  region?: string | null; // State / Administrative area
+  postalCode?: string | null;
+  country?: string | null;
+  isoCountryCode?: string | null;
+  name?: string | null; // Name of the place (e.g., POI, street name)
+  formattedAddress?: string; // A fully formatted address string
+}
+
+export interface LocationHookResult {
+  userCoords: UserCoords | null;
+  addressInfo: FullAddress | null;
+  errorMsg: string | null;
+  loadingLocation: boolean;
+  requestLocationPermission: () => Promise<boolean>; // Returns true if permission granted
+  fetchCurrentUserLocation: () => Promise<void>; // For re-fetching
+}
+
+export function useLocation(): LocationHookResult {
+  const [userCoords, setUserCoords] = useState<UserCoords | null>(null);
+  const [addressInfo, setAddressInfo] = useState<FullAddress | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [loadingLocation, setLoadingLocation] = useState<boolean>(true); // Start true
 
-  const requestLocationPermission = async () => {
+  const performReverseGeocode = useCallback(async (latitude: number, longitude: number) => {
     try {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        setErrorMsg('Permission to access location was denied');
-        Alert.alert(
-          'Location Access Denied',
-          'The app needs location access to provide you with nearby drone services.',
-          [{ text: 'OK' }]
-        );
-        return;
+      console.log("[useLocation] Performing reverse geocode for:", { latitude, longitude });
+      const geocodedAddresses = await LocationExpo.reverseGeocodeAsync({ latitude, longitude });
+      if (geocodedAddresses.length > 0) {
+        const firstAddress = geocodedAddresses[0];
+        // Construct a comprehensive formattedAddress if not directly provided
+        const parts = [firstAddress.name, firstAddress.streetNumber, firstAddress.street, firstAddress.district, firstAddress.city, firstAddress.subregion, firstAddress.region, firstAddress.postalCode, firstAddress.country];
+        const generatedFormattedAddress = parts.filter(Boolean).join(', ');
+
+        const fullAddr: FullAddress = {
+          ...firstAddress,
+          formattedAddress: firstAddress.formattedAddress || generatedFormattedAddress
+        };
+        console.log("[useLocation] Reverse geocode result:", fullAddr);
+        setAddressInfo(fullAddr);
+        return fullAddr; // Return for immediate use if needed
+      } else {
+        setErrorMsg("No address found for coordinates.");
+        setAddressInfo(null);
       }
-
-      // Attempt to get high accuracy location
-      let attempts = 0;
-      let currentLocation: Location.LocationObject | null = null;
-
-      do {
-        currentLocation = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Highest,
-        });
-
-        if (
-          currentLocation?.coords &&
-          typeof currentLocation.coords.accuracy === 'number' &&
-          currentLocation.coords.accuracy <= 50
-        ) {
-          break;
-        }
-
-        console.log(
-          'Attempt',
-          attempts + 1,
-          'Location:',
-          JSON.stringify(currentLocation, null, 2)
-        );
-
-        attempts++;
-      } while (attempts < 3);
-
-      // Check final accuracy
-      if (
-        !currentLocation?.coords ||
-        typeof currentLocation.coords.accuracy !== 'number' ||
-        currentLocation.coords.accuracy > 50
-      ) {
-        setErrorMsg('Location accuracy is too low');
-        Alert.alert(
-          'Low Location Accuracy',
-          'Unable to get a precise location. Try moving to an open area.',
-          [{ text: 'OK' }]
-        );
-        return;
-      }
-
-      setLocation(currentLocation);
-
-      // Reverse geocoding
-      const addressResponse = await Location.reverseGeocodeAsync({
-        latitude: currentLocation.coords.latitude,
-        longitude: currentLocation.coords.longitude,
-      });
-
-      if (addressResponse && addressResponse.length > 0) {
-        console.log('Address:', addressResponse[0]);
-        setAddress(addressResponse[0]); // Store address in state
-      }
-    } catch (error) {
-      console.error('Error getting location:', error);
-      setErrorMsg('Failed to get location');
+    } catch (e: any) {
+      console.error("[useLocation] Reverse geocoding error:", e);
+      setErrorMsg(`Reverse geocoding failed: ${e.message}`);
+      setAddressInfo(null);
     }
-  };
+    return null;
+  }, []);
 
-  useEffect(() => {
-    requestLocationPermission();
+  const fetchCurrentUserLocation = useCallback(async () => {
+    setLoadingLocation(true);
+    setErrorMsg(null);
+    setUserCoords(null);
+    setAddressInfo(null);
+
+    console.log("[useLocation] fetchCurrentUserLocation called");
+    let { status } = await LocationExpo.getForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      status = (await LocationExpo.requestForegroundPermissionsAsync()).status;
+    }
+
+    console.log("[useLocation] Permission status:", status);
+    if (status !== 'granted') {
+      setErrorMsg('Location permission denied.');
+      Alert.alert(
+        'Location Permission',
+        'This app needs location access to function properly. Please enable it in settings.',
+        [{ text: 'OK' }]
+      );
+      setLoadingLocation(false);
+      return;
+    }
+
+    try {
+      console.log("[useLocation] Getting current position...");
+      // Consider using getLastKnownPositionAsync first for speed, then getCurrentPositionAsync
+      const location = await LocationExpo.getCurrentPositionAsync({
+        accuracy: LocationExpo.Accuracy.Balanced, // Balanced is often good enough and faster
+      });
+      console.log("[useLocation] Got position:", location.coords);
+      setUserCoords(location.coords);
+      await performReverseGeocode(location.coords.latitude, location.coords.longitude);
+    } catch (e: any) {
+      console.error("[useLocation] Error getting location:", e);
+      setErrorMsg(`Failed to get location: ${e.message}. Ensure GPS is on.`);
+      // Alert.alert("Location Error", `Could not fetch location. Ensure GPS is enabled. ${e.message}`);
+    } finally {
+      setLoadingLocation(false);
+    }
+  }, [performReverseGeocode]);
+
+  const requestLocationPermission = useCallback(async (): Promise<boolean> => {
+    let { status } = await LocationExpo.getForegroundPermissionsAsync();
+    if (status === 'granted') return true;
+
+    status = (await LocationExpo.requestForegroundPermissionsAsync()).status;
+    if (status !== 'granted') {
+      setErrorMsg('Location permission denied.');
+      Alert.alert(
+        'Location Permission Required',
+        'This app needs location access to show relevant information. Please grant permission.',
+        [{ text: 'OK' }]
+      );
+      return false;
+    }
+    return true;
   }, []);
 
   useEffect(() => {
-    if (location) {
-      console.log('Location updated in state:', JSON.stringify(location, null, 2));
-    }
-  }, [location]);
+    fetchCurrentUserLocation(); // Fetch on initial mount
+  }, [fetchCurrentUserLocation]); // fetchCurrentUserLocation is memoized with useCallback
 
-  useEffect(() => {
-    if (address) {
-      console.log('Address updated in state:', JSON.stringify(address, null, 2));
-    }
-  }, [address]);
-
-  return { location, address, errorMsg, requestLocationPermission };
+  return { userCoords, addressInfo, errorMsg, loadingLocation, requestLocationPermission, fetchCurrentUserLocation };
 }
